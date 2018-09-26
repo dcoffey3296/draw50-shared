@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<!-- note, disable touch overscroll! https://www.addictivetips.com/web/disable-swipe-to-go-back-in-chrome/ -->
+<!-- https://github.com/socketio/socket.io/issues/1942, http://nginx.org/en/docs/http/websocket.html -->
+<html>
+
+	<head>
+		<title>Draw50</title>
+		<meta name="viewport" content="width=device-width, user-scalable=no">
+		<meta charset="UTF-8">
+
+		<!-- font awesome for icons -->
+		<link href="https://fonts.googleapis.com/css?family=Roboto+Condensed" rel="stylesheet">
+		<link rel="stylesheet" href="https://use.fontawesome.com/releases/v5.3.1/css/all.css" integrity="sha384-mzrmE5qonljUremFsqc01SB46JvROS7bZs3IO2EmfFsd15uHvIt+Y8vEf7N7fWAU" crossorigin="anonymous">
+
+		<!-- custom style sheet -->
+		<link rel="stylesheet" type="text/css" href="/css/style.css">
+
+		<!-- js libraries -->
+		<script src="https://code.jquery.com/jquery-3.3.1.min.js"></script>
+		<script src="/js/hammer.js"></script>
+		<script src="/js/paper-full.js"></script>
+		<script src="/js/socket.io.js"></script>
+
+		<script type="text/javascript" canvas="touch-me">
+		// defaults
+		var socket = io({transports: ['websocket'], query: {room: window.location.pathname}});
+		var path;
+		var hidden = [];
+		var undoAll = false;
+		var emojis = ["❤️", "😀", "😃", "😄", "😁", "😆", "😅", "🤣", "😂", "🙂",
+									"🙃", "😉", "😊", "😇", "😺", "😸", "😹", "😻", "😼", "😽",
+									"🙀", "💌", "💘", "💝", "💖", "💗", "💓", "💞", "💕", "👏",
+									"✨", "🎈", "🎉", "🎊", "🦄", "☕", "👑", "💥", "💫", "🤠",
+									"👻", "👽", "👾", "🤖", "😎"];
+
+		// pen defaults
+		var backgroundColor = 'black';
+		var defaultPenColor = 'white';
+		var penColor = defaultPenColor;
+		var defaultPenWeight = 4;
+		var penWeight = defaultPenWeight;
+
+		// eraser defaults
+		var eraserColor = backgroundColor;
+		var eraserWeight = 100;
+		var bigEraseMultiplier = 8;
+
+		// time for menu to be out before hiding (in ms)
+		var menuHideDeltaDefault = 3000;
+		var menuHideDelta = menuHideDeltaDefault;
+		var menuLastTouched = -1;
+
+		// last action to prevent defaults
+		var lastAction;
+		var lastNumPointers;
+		var lastEv;
+		var lastIndex;
+
+		var debug = false;
+
+		// prevent right click to avoid pop-up menu
+		document.addEventListener('contextmenu', event => event.preventDefault());
+
+		function undo() {
+			// stop if there is nothing left to undo
+			if (paper.project.layers['defaultLayer'].children.length < 1) {
+				return;
+			}
+
+			// swap arrays and make element invisible
+			hidden.push(paper.project.layers['defaultLayer'].children.pop());
+			hidden[hidden.length - 1].visible = false;
+			menuLastTouched = Date.now();
+		}
+
+		// function to redo last undo
+		function redo() {
+			if (hidden.length < 1) {
+				return;
+			}
+
+			// swap arrays and make element visible
+			paper.project.layers['defaultLayer'].children.addChild(hidden.pop());
+			paper.project.layers['defaultLayer'].children.paths[paper.project.layers['defaultLayer'].children.length - 1].visible = true;
+			menuLastTouched = Date.now();
+		}
+
+		// function to clear the screen
+		function clearScreen() {
+			paper.project.layers['defaultLayer'].removeChildren();
+			hidden = [];
+			paper.view.draw();
+			menuLastTouched = Date.now();
+			clearEmojis();
+		}
+
+		function increasePen() {
+			penWeight += 2;
+			updateStrokeIndicator()
+			menuLastTouched = Date.now();
+		}
+
+		function decreasePen() {
+			// preserve minimum stroke of 4
+			if (penWeight >= 4){
+				penWeight -= 2;
+				updateStrokeIndicator()
+			}
+			menuLastTouched = Date.now();
+		}
+
+		function changePenColor(color) {
+			penColor = color;
+			updateStrokeIndicator()
+			menuLastTouched = Date.now();
+		}
+
+		function resetPen() {
+			penColor = defaultPenColor;
+			penWeight = defaultPenWeight;
+			updateStrokeIndicator()
+			menuLastTouched = Date.now();
+		}
+
+		function showMenu() {
+			menuLastTouched = Date.now();
+			refreshDownload();
+
+			// if we've swiped up a couple of times to keep the menu up longer
+			$("#customMenu").slideDown(400, function(){
+				hideMenu();
+			});
+		}
+
+		function updateStrokeIndicator() {
+			$("#strokeIndicator").text(penWeight).css("color", penColor);
+		}
+
+		function clearEmojis() {
+			try {
+				paper.project.layers['emojiLayer'].removeChildren();
+				paper.view.draw();
+			} catch (e) {
+
+			}
+		}
+
+		function finishErase() {
+
+			// now that we're done, change the ink color to white and change the blend mode, this acts as a mask, rather than painting black on top.  You see black on top if you download the png, unless you use this blend mode (acts like a clipping mask)
+			paper.project.layers['defaultLayer'].lastChild.blendMode = 'destination-out';
+		}
+
+		function hideMenu() {
+			// base case if the menu is hidden
+			if ($("#customMenu").css('display') == "none") {
+				return;
+			}
+
+			// check if we're longer than the menu hide delta
+			if (Date.now() - menuLastTouched > menuHideDelta) {
+				$("#customMenu").slideUp();
+
+				// reset the delta for hiding the menu to the default (in case someone has continuiously swiped to keep it open)
+				menuHideDelta = menuHideDeltaDefault;
+
+			} else {
+				// update the save function in case canvas is updated (refreshes the png in case of download)
+				refreshDownload();
+
+				// it hasn't been long enough, wait another second and check again
+				setTimeout(hideMenu, 1000);
+			}
+		}
+
+		// updates the href on the save icon with a fresh png version of the canvas to download
+		function refreshDownload() {
+			let c = document.getElementById("touch-me");
+			let img = c.toDataURL('image/png').replace("image/png", "image/octet-stream");;
+			let d = new Date();
+
+			var datestring = d.getFullYear() + "-" + (d.getMonth()+1) + "-" + d.getDate() + "-" + d.getHours() + d.getMinutes() + ".png";
+
+			$("#download").attr("download", "draw50-" + datestring);
+			$("#download").attr("href", img);
+		}
+
+		function saveToLocalStorage() {
+			// TODO:
+			// prevent overwriting the saved JSON file accidentally
+			// case: when a user wants to restore the canvas, but accidentally draws
+			// something on the canvas
+			try {
+				localStorage.setItem('draw50canvas', paper.project.exportJSON());
+			} catch (error) {
+				console.log(error);
+			};
+
+		};
+
+		function getFromLocalStorage() {
+
+			try {
+				// attempt to retrieve saved draw50 JSON data
+				let json = localStorage.getItem('draw50canvas');
+
+				// if draw50 JSON file existed, load the JSON file to canvas
+				if (json !== null) {
+					// first clear the canvas
+					paper.project.clear();
+					paper.importJSON(json);
+					return;
+				};
+			} catch (error) {
+				console.log(error);
+			};
+
+		};
+
+		function emojiRain(emojiCount) {
+
+			// get the layer for emojis
+			var layer = paper.project.layers['emojiLayer'];
+
+			// if emojis are already placed, don't do it again
+			if (layer.hasChildren()) {
+				return;
+			}
+
+			// no emojis, it's emoji time
+			layer.activate();
+			let emojiSymbols = [];
+
+			// turn emojis into symbols
+			for (let i = 0; i < emojis.length; i++) {
+				let e = new paper.PointText({
+					content: emojis[i],
+					center: [0.0],
+					fontSize: "2rem",
+				});
+				let s = new paper.Symbol(e);
+				emojiSymbols.push(s);
+			}
+
+			// Iterate over the items
+			for (var i = 0; i < emojiCount; i++) {
+
+				// create a symbol from the emoji
+				let symbol = emojiSymbols[Math.floor(Math.random() * emojiSymbols.length)];
+
+				// place the emoji randomly on the view
+				var center = new paper.Point(Math.floor(Math.random() * paper.view.size.width), Math.floor(Math.random() * paper.view.size.height));
+				var placedSymbol = symbol.place(center);
+				placedSymbol.scale(i / emojiCount);
+			}
+
+			// put emojis behind drawing
+			layer.sendToBack();
+
+			// activate the default layer so it's not tied to the emoji layer
+			paper.project.layers['defaultLayer'].activate();
+		}
+
+		// main function
+		$(function() {
+
+			// setup the canvas
+			var canvas = document.getElementById('touch-me');
+			paper.setup(canvas);
+			$("#touch-me").css("background-color", backgroundColor);
+
+			// socket stuff
+			socket.on('boardState', function(data){
+				console.log("BOARD STATE", data);
+			});
+
+			socket.on('log', function(data) {
+				console.log("LOG", data);
+			});
+
+			socket.on('startDraw', function(index, path){
+				console.log("onStartDraw", index, path, paper.project.layers['defaultLayer'].children)
+				try {
+					paper.project.layers['defaultLayer'].children[index] = paper.importJSON(path);
+				} catch {
+					paper.project.layers['defaultLayer'].children.add(paper.importJSON(path));
+				}
+				paper.view.draw();
+			});
+
+			socket.on('updateDraw', function(index, xy){
+				// console.log(paper.project.layers['defaultLayer'].children)
+				console.log("updateDraw", xy)
+				paper.project.layers['defaultLayer'].children[index].add({ x: xy[0], y: xy[1] });
+				paper.view.draw();
+			});
+
+			socket.on('endDraw', function(index) {
+				paper.project.layers['defaultLayer'].children[index].simplify(8);
+			});
+
+			// display default size/color of the stroke in the menu
+			updateStrokeIndicator();
+
+			// setup layer for emojis
+			let layer = new paper.Layer();
+			layer.name ="emojiLayer";
+
+			// setup layer for paper
+			layer = new paper.Layer();
+			layer.name ="defaultLayer";
+
+			// activate the default layer
+			paper.project.layers['defaultLayer'].activate();
+
+			// setup hammer.js for the bottom left corner for the secret menu
+			var swipeMenu = new Hammer.Manager(document.getElementById('mb'));
+			var swipe = new Hammer.Swipe();
+			swipeMenu.add(swipe);
+
+			// enable swipe at bottom left corner to show secret menu (auto-hides after 4 secs)
+			swipeMenu.on('swipeup', function() {
+				// if the menu is already showing, delay it's hiding further
+				if ($("#customMenu").css('display') != 'none'){
+					menuHideDelta *= 2;
+				}
+
+				showMenu();
+			});
+
+			// manually hide the menu
+			swipeMenu.on('swipedown', function() {
+				$("#customMenu").slideUp();
+			});
+
+			// setup hammer.js for the main canvas
+			mc = new Hammer.Manager(canvas);
+			
+			// add listener (else we won't get nearly as many events)
+			var pan = new Hammer.Pan({ pointers: 1 });
+			mc.add(pan);
+
+
+			/*
+			 *	 ACTIONS RELATED TO DRAWING 
+			 */
+
+
+			function startDraw(ev) {
+
+				if (debug) {
+					console.log("startDraw");
+				}
+
+				// remember that this is the last action that we started
+				lastAction = 'draw';
+
+				path = new paper.Path({
+					segments: [{ x: ev.center.x, y: ev.center.y }],
+					strokeColor: penColor,
+					strokeWidth: penWeight,
+					strokeCap: 'round',
+					fullySelected: false
+				});
+				let p = paper.project.layers['defaultLayer'].addChild(path);
+
+				lastIndex = p.index;
+				console.log("START DRAW", p)
+				socket.emit('startDraw', p.index, p.exportJSON());
+
+				// now that we've restarted history, don't remember previous undos
+				hidden = [];
+				return;
+			}
+
+			function middleDraw(ev) {
+				if (debug) {
+					console.log("middleDraw");
+				}
+				console.log("middleDraw", ev.center);
+				// take action on the pointer moving
+				paper.project.layers['defaultLayer'].children[lastIndex].add({ x: ev.center.x, y: ev.center.y });
+				socket.emit('updateDraw', lastIndex, [ev.center.x, ev.center.y]);
+				return;
+			}
+
+			function endDraw(ev) {
+				if (debug) {
+					console.log("endDraw");
+				}
+				// end draw
+				paper.project.layers['defaultLayer'].lastChild.simplify(8);
+				socket.emit('endDraw', lastIndex);
+
+				// special feature for pen touch
+				if (ev.pointerType == 'pen') {
+					if (debug) {
+						console.log("PEN");
+					}
+					// emojiRain(250);
+				}
+
+				return;
+			}
+
+			/*
+			 *	 ACTIONS RELATED TO ERASING 
+			 */
+			
+			function startErase(ev, bigErase = false) {
+				if (debug) {
+					console.log("startErase", bigErase);
+				}
+
+				if (!bigErase) {
+					// remember that this is the last action that we started
+					lastAction = 'erase';
+
+					// setup for normal erase
+					path = new paper.Path({
+						segments: [{ x: ev.center.x, y: ev.center.y }],
+						strokeColor: eraserColor,
+						strokeWidth: eraserWeight,
+						strokeCap: 'round',
+						fullySelected: false
+					});
+					paper.project.layers['defaultLayer'].addChild(path);
+
+					return;
+				} else {
+					// remember that this is the last action that we started
+					lastAction = 'bigErase';
+
+					// setup for big erase
+					path = new paper.Path({
+						segments: [{ x: ev.center.x, y: ev.center.y }],
+						strokeColor: eraserColor,
+						strokeWidth: eraserWeight * bigEraseMultiplier,
+						strokeCap: 'round',
+						fullySelected: false
+					});
+					paper.project.layers['defaultLayer'].addChild(path);
+
+					return;
+				}
+			}
+
+			function middleErase(ev, bigErase = false) {
+				if (debug) {
+					console.log("middleErase");
+				}
+				// add the new point
+				paper.project.layers['defaultLayer'].lastChild.add({ x: ev.center.x, y: ev.center.y });
+			}
+
+			function endErase(ev, bigErase = false) {	
+				if (debug) {
+					console.log("endErase");
+				}			
+				// we're done erasing, complete erasing cleanup
+				finishErase();
+			}
+
+			
+
+
+			/*
+			 *	 ACTIONS RELATED TO PANNING 
+			 */
+
+			 function startPan(ev) {
+			 	if (debug) {
+					console.log("startPan");
+				}
+			 	lastAction = 'pan';
+			 	lastEv = ev;
+			 	// always remove the last layer in strokes, it draw/erase ALWAYS happen before pan
+			 	paper.project.layers['defaultLayer'].removeChildren(paper.project.layers['defaultLayer'].lastChild.index);
+			 }
+
+			 function middlePan(ev) {
+
+			 	if (debug) {
+					console.log("middlePan");
+				}
+
+			 	// take action on the middle part of the pan
+				let layerCount = paper.project.layers.length;
+
+				// move all layers, not just the 
+				for (let i = 0; i < layerCount; i++) {
+					// special case and skip emoji layer, do not move
+					if (paper.project.layers[i].name == 'emojiLayer') {
+						continue;
+					}
+				
+					// figure out layer center of the last position
+					let layerX = paper.project.layers[i].position.x - lastEv.center.x;
+					let layerY = paper.project.layers[i].position.y - lastEv.center.y;
+
+					// move the layers to the new xy position
+					paper.project.layers[i].position.x = layerX + ev.center.x;
+					paper.project.layers[i].position.y = layerY + ev.center.y;
+					lastEv = ev;
+				}
+			 }
+
+			 function endPan(ev) {
+			 	if (debug) {
+					console.log("endPan");
+				}
+			 	// nothing to do
+			 }
+
+
+			/*
+			 *	 Handle all touch events
+			 */
+			// intercept all touch events to deal with 1 and 2 fingers
+			mc.on('hammer.input', function(ev) {
+
+				// start processing events / actions
+				if (ev.isFirst) {
+					startFirstAction(ev);
+				} else if (ev.isFinal) {
+					saveToLocalStorage();
+					finishCurrentAction(ev);
+				} else {
+					handleMiddleEvent(ev);
+				}
+
+			});
+
+			function startFirstAction(ev) {
+				lastNumPointers = ev.maxPointers;
+
+				switch (ev.maxPointers) {
+					case 1:
+						startDraw(ev);
+					break;
+
+					case 2:
+						startErase(ev);
+					break;
+
+					case 3:
+						startErase(ev, true);
+					break;
+
+					case 5:
+						startPan(ev);
+					break;
+				}
+			}
+
+			function handleMiddleEvent(ev) {
+				// if we have a new action, end the current operation and start a new one
+				if (lastNumPointers != ev.maxPointers) {
+					finishCurrentAction(ev);
+					startFirstAction(ev);
+					return;
+				}
+
+				switch (lastAction) {
+					case 'draw':
+						middleDraw(ev);
+					break;
+
+					case 'bigErase':
+					case 'erase':
+						middleErase(ev);
+					break;
+
+					case 'pan':
+						middlePan(ev);
+					break;
+				}
+			}
+			function finishCurrentAction(ev) {
+				switch (lastAction) {
+					case 'draw':
+						endDraw(ev);
+					break;
+
+					case 'erase':
+					case 'bigErase':
+						endErase(ev);
+					break;
+
+					case 'pan':
+						endPan(ev);
+					break;
+				}
+			}
+
+			// function called on every frame, use this to animate emojis in the background if they exist
+			paper.view.onFrame = function(event) {
+
+				// Run through the active layer's children list and change
+				// the position of the placed symbols:
+
+				if (paper.project.layers['emojiLayer'].hasChildren()) {
+					for (var i = 0; i < paper.project.layers['emojiLayer'].children.length; i++) {
+						var item = paper.project.layers['emojiLayer'].children[i];
+
+						// Move the item 1/20th of its width to the right. This way
+						// larger circles move faster than smaller circles:
+						item.position.x += item.bounds.width / 20;
+
+						// If the item has left the view on the right, move it back
+						// to the left:
+						if (item.bounds.left > paper.view.size.width) {
+							item.position.x = -item.bounds.width;
+						}
+					}
+				}
+			};
+
+		});
+		</script>
+	</head>
+
+	<body>
+		<button class="top-left hidden corner" onclick="undo();"></button>
+		<button class="top-right hidden corner" onclick="redo();"></button>
+		<button id="mb" class="bottom-left hidden corner" onclick="undo();"></button>
+		<button class="bottom-right hidden corner" onclick="redo();"></button>
+		<canvas id="touch-me" resize></canvas>
+		<div id="customMenu">
+			<button class="menuButton plusminus" onclick="decreasePen();">-</button>
+			<span id="strokeIndicator" onclick="resetPen();">4</span>
+			<button class="menuButton plusminus" onclick="increasePen();">+</button>
+			<button class="menuButton dot red" onclick="changePenColor('red');"></button>
+			<button class="menuButton dot green" onclick="changePenColor('green');"></button>
+			<button class="menuButton dot orange" onclick="changePenColor('orange');"></button>
+			<button class="menuButton dot yellow" onclick="changePenColor('yellow');"></button>
+			<button class="menuButton dot blue" onclick="changePenColor('blue');"></button>
+			<button class="menuButton dot white" onclick="changePenColor('white');"></button>
+			<button class="menuButton" onclick="clearScreen();"><i class="fas fas fa-trash-alt"></i></button>
+			<button class="menuButton" onclick="getFromLocalStorage();"><i class="fas fa-undo"></i></button>
+			<a href="#" class="menuButton download" id="download" download="my-file-name.png"><i class="fas fa-download"></i></a>
+		</div>
+	</body>
+</html>
