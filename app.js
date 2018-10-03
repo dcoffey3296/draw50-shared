@@ -79,6 +79,21 @@ io.on('connection', function(socket){
         socket.to(thisBoard).emit('endDraw', index);
     });
 
+
+    socket.on('startErase', function(childrenIndex, path){
+        console.log("startErase");
+        socket.to(thisBoard).emit('startErase', childrenIndex, path);
+    });
+
+    socket.on('updateErase', function(childrenIndex, xy) {
+        console.log("updateErase");
+    });
+
+    socket.on('endErase', function(index) {
+        socket.to(thisBoard).emit('endErase', index);
+    });
+
+
     socket.on('error', function(error){
         console.log("ERROR", error);
     })
