@@ -80,8 +80,8 @@
 			}
 
 			// swap arrays and make element visible
-			paper.project.layers['defaultLayer'].children.addChild(hidden.pop());
-			paper.project.layers['defaultLayer'].children.paths[paper.project.layers['defaultLayer'].children.length - 1].visible = true;
+			paper.project.layers['defaultLayer'].addChild(hidden.pop());
+			paper.project.layers['defaultLayer'].lastChild.visible = true;
 			menuLastTouched = Date.now();
 		}
 
@@ -176,7 +176,7 @@
 		// updates the href on the save icon with a fresh png version of the canvas to download
 		function refreshDownload() {
 			let c = document.getElementById("touch-me");
-			let img = c.toDataURL('image/png').replace("image/png", "image/octet-stream");;
+			let img = c.toDataURL('image/png').replace("image/png", "image/octet-stream");
 			let d = new Date();
 
 			var datestring = d.getFullYear() + "-" + (d.getMonth()+1) + "-" + d.getDate() + "-" + d.getHours() + d.getMinutes() + ".png";
@@ -369,7 +369,7 @@
 				socket.emit('startDraw', p.index, p.exportJSON());
 
 				// now that we've restarted history, don't remember previous undos
-				hidden = [];
+				// hidden = [];
 				return;
 			}
 
